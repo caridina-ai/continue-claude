@@ -93,7 +93,7 @@ func runWatch(args []string) error {
 	}
 
 	if statusLineMode {
-		defer clearLock(*stateDir)
+		defer clearLock(*stateDir, target)
 	}
 
 	deadline := fireAt.Add(*timeout)
@@ -107,18 +107,18 @@ func runWatch(args []string) error {
 		switch state {
 		case coninject.StateModal:
 			err := coninject.Inject(target, unlockSteps())
-			logf("modal -> inject 1+continue (err=%v)", err)
+			logf("pid=%d modal -> inject 1+continue (err=%v)", target, err)
 			return err
 		case coninject.StateIdle:
 			err := coninject.Inject(target, idleSteps())
-			logf("idle -> inject continue-prompt (err=%v)", err)
+			logf("pid=%d idle -> inject continue-prompt (err=%v)", target, err)
 			return err
 		case coninject.StateBusy:
-			logf("busy -> stand down (not blocked)")
+			logf("pid=%d busy -> stand down (not blocked)", target)
 			return nil
 		default:
 			if time.Now().After(deadline) {
-				logf("unknown -> timeout, stand down (readErr=%v)", err)
+				logf("pid=%d unknown -> timeout, stand down (readErr=%v)", target, err)
 				return nil
 			}
 			time.Sleep(15 * time.Second)
@@ -170,9 +170,9 @@ func idleSteps() []coninject.Step {
 	}
 }
 
-func clearLock(stateDir string) {
+func clearLock(stateDir string, claudePID uint32) {
 	if stateDir == "" {
 		return
 	}
-	_ = os.Remove(filepath.Join(stateDir, "armed.lock"))
+	_ = os.Remove(filepath.Join(stateDir, lockName(claudePID)))
 }

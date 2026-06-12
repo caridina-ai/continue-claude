@@ -151,16 +151,20 @@ func ensureWatcher(opts statusOptions, resetUnix int64) {
 		return
 	}
 	_ = os.MkdirAll(opts.stateDir, 0o755)
-	lockPath := filepath.Join(opts.stateDir, "armed.lock")
+
+	// Lock per claude instance, not globally: several Claude Code sessions share
+	// the same account-wide reset, so a single shared lock would let only the
+	// first arm a watcher. Each status line owns its own claude's PID.
+	claudePID, err := coninject.FindClaudePID()
+	if err != nil {
+		return
+	}
+	lockPath := filepath.Join(opts.stateDir, lockName(claudePID))
 
 	if existing, alive := readLock(lockPath); existing == resetUnix && alive {
 		return
 	}
 
-	claudePID, err := coninject.FindClaudePID()
-	if err != nil {
-		return
-	}
 	exe, err := os.Executable()
 	if err != nil {
 		return
@@ -196,6 +200,11 @@ func readLock(path string) (resetUnix int64, alive bool) {
 
 func writeLock(path string, resetUnix int64, pid uint32) {
 	_ = os.WriteFile(path, []byte(fmt.Sprintf("%d %d\n", resetUnix, pid)), 0o644)
+}
+
+// lockName is the per-claude-instance lock file name.
+func lockName(claudePID uint32) string {
+	return fmt.Sprintf("armed-%d.lock", claudePID)
 }
 
 func defaultStateDir() (string, error) {

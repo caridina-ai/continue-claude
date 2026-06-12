@@ -79,6 +79,10 @@ The status line accepts these flags (append them after `continue-claude` in the
 
 The watcher logs every arm/action to `~/.continue-claude/watch.log`.
 
+Multiple Claude Code sessions are handled independently: each status line arms
+and tracks its own watcher with a per-instance lock (`armed-<pid>.lock`), so all
+of them recover when a shared account-wide limit resets.
+
 ## Unblock a stuck session manually
 
 You don't have to wait for the status line to arm a watcher in advance — if a
