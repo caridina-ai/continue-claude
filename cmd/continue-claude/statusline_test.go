@@ -124,6 +124,21 @@ func TestFormatLocalMinute(t *testing.T) {
 	}
 }
 
+func TestLockPID(t *testing.T) {
+	if pid, ok := lockPID("armed-1234.lock"); !ok || pid != 1234 {
+		t.Fatalf("armed-1234.lock => (%d,%v), want (1234,true)", pid, ok)
+	}
+	for _, bad := range []string{"armed.lock", "watch.log", "armed-.lock", "armed-abc.lock", "armed-1234.txt"} {
+		if _, ok := lockPID(bad); ok {
+			t.Fatalf("lockPID(%q) should be false", bad)
+		}
+	}
+	// round-trip with lockName
+	if pid, ok := lockPID(lockName(99)); !ok || pid != 99 {
+		t.Fatalf("round-trip lockName(99) => (%d,%v)", pid, ok)
+	}
+}
+
 func TestFormatPercentage(t *testing.T) {
 	if got := formatPercentage(nil); got != "--%" {
 		t.Fatalf("nil = %q, want --%%", got)

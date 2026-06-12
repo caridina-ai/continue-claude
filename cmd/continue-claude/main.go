@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/caridina-ai/continue-claude/internal/coninject"
@@ -38,6 +39,9 @@ func main() {
 		case "help", "-h", "--help":
 			fmt.Fprintln(os.Stderr, usage)
 			return
+		case "version", "-version", "--version":
+			fmt.Fprintln(os.Stdout, versionString())
+			return
 		case "watch":
 			fail("watch", runWatch(args[1:]))
 			return
@@ -54,6 +58,17 @@ func main() {
 	}
 
 	fail("statusline", runStatusline(args, os.Stdin, os.Stdout, os.Stderr))
+}
+
+// versionString reports the module version the binary was built from. When
+// installed via `go install ...@vX.Y.Z` this is the git tag; for a local build
+// it is "(devel)". Nothing to bump by hand — tag a release and it follows.
+func versionString() string {
+	v := "(devel)"
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+		v = info.Main.Version
+	}
+	return "continue-claude " + v
 }
 
 func fail(name string, err error) {

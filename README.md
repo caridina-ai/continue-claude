@@ -98,8 +98,9 @@ continue-claude watch          # act now (e.g. the limit already reset)
 - The time is a 24-hour `HH:MM`; if it has already passed today it is taken as
   tomorrow. A `-delay` (default `3m`) is added as a safety buffer after the
   reset — pass `-delay 0` to act exactly at the given time.
-- With multiple Claude Code instances running, it picks the one showing the
-  rate-limit modal. If that is ambiguous, pass `-pid <PID>` explicitly.
+- With a single Claude Code running it is picked automatically. With several it
+  does not guess — it lists each PID and its detected state and asks you to
+  re-run with `-pid <PID>`.
 - It reads the screen before acting, so if the session is actually busy it
   stands down instead of injecting.
 

@@ -1,7 +1,9 @@
 package coninject
 
 import (
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"unsafe"
 
@@ -87,10 +89,9 @@ func ListClaudePIDs() ([]uint32, error) {
 }
 
 // FindBlockedClaude locates the claude.exe to act on when no PID is given. With
-// a single instance it returns that one; with several it reads each console and
-// prefers the one showing the rate-limit modal (falling back to an idle one).
-// This lets an ad-hoc `watch` run from an unrelated terminal still find the
-// right target, since the parent chain does not lead to it.
+// a single instance it returns that one. With several it does not guess: it
+// returns an error listing each PID and its detected state, so the user can
+// re-run with an explicit -pid.
 func FindBlockedClaude() (uint32, error) {
 	pids, err := ListClaudePIDs()
 	if err != nil {
@@ -103,21 +104,15 @@ func FindBlockedClaude() (uint32, error) {
 		return pids[0], nil
 	}
 
-	var idleFallback uint32
+	sort.Slice(pids, func(i, j int) bool { return pids[i] < pids[j] })
+	var b strings.Builder
+	fmt.Fprintf(&b, "found %d claude.exe; choose one with -pid <PID>:", len(pids))
 	for _, pid := range pids {
-		screen, err := ReadScreen(pid)
-		if err != nil {
-			continue
+		state := "unreadable"
+		if screen, err := ReadScreen(pid); err == nil {
+			state = Classify(screen).String()
 		}
-		switch Classify(screen) {
-		case StateModal:
-			return pid, nil
-		case StateIdle:
-			idleFallback = pid
-		}
+		fmt.Fprintf(&b, "\n  -pid %d  (%s)", pid, state)
 	}
-	if idleFallback != 0 {
-		return idleFallback, nil
-	}
-	return 0, fmt.Errorf("found %d claude.exe but none at the rate-limit modal; pass -pid explicitly", len(pids))
+	return 0, errors.New(b.String())
 }

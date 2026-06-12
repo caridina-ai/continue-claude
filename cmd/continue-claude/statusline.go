@@ -151,6 +151,7 @@ func ensureWatcher(opts statusOptions, resetUnix int64) {
 		return
 	}
 	_ = os.MkdirAll(opts.stateDir, 0o755)
+	sweepStaleLocks(opts.stateDir)
 
 	// Lock per claude instance, not globally: several Claude Code sessions share
 	// the same account-wide reset, so a single shared lock would let only the
@@ -205,6 +206,42 @@ func writeLock(path string, resetUnix int64, pid uint32) {
 // lockName is the per-claude-instance lock file name.
 func lockName(claudePID uint32) string {
 	return fmt.Sprintf("armed-%d.lock", claudePID)
+}
+
+// lockPID parses the claude PID out of a lock file name, or reports false if the
+// name is not a lock file.
+func lockPID(filename string) (uint32, bool) {
+	if !strings.HasPrefix(filename, "armed-") || !strings.HasSuffix(filename, ".lock") {
+		return 0, false
+	}
+	mid := strings.TrimSuffix(strings.TrimPrefix(filename, "armed-"), ".lock")
+	pid, err := strconv.ParseUint(mid, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(pid), true
+}
+
+// sweepStaleLocks removes armed-<pid>.lock files whose claude process no longer
+// exists. Such a file is necessarily a leftover (the owning session is gone), so
+// deleting it is safe and keeps the state directory from accumulating junk.
+func sweepStaleLocks(stateDir string) {
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		pid, ok := lockPID(e.Name())
+		if !ok {
+			continue
+		}
+		if !coninject.IsAlive(pid) {
+			_ = os.Remove(filepath.Join(stateDir, e.Name()))
+		}
+	}
 }
 
 func defaultStateDir() (string, error) {
