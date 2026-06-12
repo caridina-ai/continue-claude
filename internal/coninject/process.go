@@ -70,3 +70,54 @@ func IsAlive(pid uint32) bool {
 	_, ok := procs[pid]
 	return ok
 }
+
+// ListClaudePIDs returns the PIDs of every running claude.exe.
+func ListClaudePIDs() ([]uint32, error) {
+	procs, err := snapshotProcs()
+	if err != nil {
+		return nil, err
+	}
+	var pids []uint32
+	for pid, row := range procs {
+		if strings.EqualFold(row.name, "claude.exe") {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+// FindBlockedClaude locates the claude.exe to act on when no PID is given. With
+// a single instance it returns that one; with several it reads each console and
+// prefers the one showing the rate-limit modal (falling back to an idle one).
+// This lets an ad-hoc `watch` run from an unrelated terminal still find the
+// right target, since the parent chain does not lead to it.
+func FindBlockedClaude() (uint32, error) {
+	pids, err := ListClaudePIDs()
+	if err != nil {
+		return 0, err
+	}
+	switch len(pids) {
+	case 0:
+		return 0, fmt.Errorf("no claude.exe process found")
+	case 1:
+		return pids[0], nil
+	}
+
+	var idleFallback uint32
+	for _, pid := range pids {
+		screen, err := ReadScreen(pid)
+		if err != nil {
+			continue
+		}
+		switch Classify(screen) {
+		case StateModal:
+			return pid, nil
+		case StateIdle:
+			idleFallback = pid
+		}
+	}
+	if idleFallback != 0 {
+		return idleFallback, nil
+	}
+	return 0, fmt.Errorf("found %d claude.exe but none at the rate-limit modal; pass -pid explicitly", len(pids))
+}

@@ -79,6 +79,26 @@ The status line accepts these flags (append them after `continue-claude` in the
 
 The watcher logs every arm/action to `~/.continue-claude/watch.log`.
 
+## Unblock a stuck session manually
+
+You don't have to wait for the status line to arm a watcher in advance — if a
+session is *already* frozen at the rate-limit modal, open another terminal and
+run `watch` ad-hoc. It auto-detects the blocked claude (no PID needed) and waits
+until the reset time you give it, so you don't have to sit there:
+
+```sh
+continue-claude watch 19:30    # wait until 19:30, then press 1 + continue
+continue-claude watch          # act now (e.g. the limit already reset)
+```
+
+- The time is a 24-hour `HH:MM`; if it has already passed today it is taken as
+  tomorrow. A `-delay` (default `3m`) is added as a safety buffer after the
+  reset — pass `-delay 0` to act exactly at the given time.
+- With multiple Claude Code instances running, it picks the one showing the
+  rate-limit modal. If that is ambiguous, pass `-pid <PID>` explicitly.
+- It reads the screen before acting, so if the session is actually busy it
+  stands down instead of injecting.
+
 ## Caveats
 
 - **Windows only.** It relies on the Win32 console API.
@@ -89,10 +109,11 @@ The watcher logs every arm/action to `~/.continue-claude/watch.log`.
 
 ## Internal subcommands
 
-The status line spawns the binary against itself; you do not normally call these:
+The status line spawns the binary against itself; you do not normally call these
+directly (though `watch` doubles as the manual unblock command above):
 
 ```
-continue-claude watch    -pid <PID> -reset <unix> [-delay <dur>] [-state <dir>]
+continue-claude watch    [-pid <PID>] [-reset <unix>] [-delay <dur>] [-state <dir>] [HH:MM]
 continue-claude inject   -pid <PID> [-delay <dur>] -mode <raw|unlock> [-text <s>] [-enter]
 continue-claude snapshot -pid <PID> [-delay <dur>] -out <file>
 ```

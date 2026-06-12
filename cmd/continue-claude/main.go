@@ -15,8 +15,13 @@ Usage:
   continue-claude [-state <dir>] [-usage-threshold N] [-week-threshold N] [-post-reset-delay <dur>]
                   (default: status line — reads Claude Code's status JSON on stdin)
 
+Ad-hoc: unblock a session that is already stuck. Auto-detects the blocked
+claude and waits until the given reset time, then unlocks:
+  continue-claude watch 19:30        (waits until 19:30, then presses 1 + continue)
+  continue-claude watch              (acts now — e.g. the limit already reset)
+
 Internal subcommands (the status line spawns these itself):
-  continue-claude watch -pid <PID> -reset <unix> [-delay <dur>] [-state <dir>]
+  continue-claude watch [-pid <PID>] [-reset <unix>] [-delay <dur>] [-state <dir>] [HH:MM]
   continue-claude inject -pid <PID> [-delay <dur>] -mode <raw|unlock> [-text <s>] [-enter]
   continue-claude snapshot -pid <PID> [-delay <dur>] -out <file>
 

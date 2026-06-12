@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/caridina-ai/continue-claude/internal/coninject"
@@ -19,23 +21,60 @@ const idlePrompt = `We just recovered from a rate limit. If you weren't finished
 
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-	pid := fs.Uint("pid", 0, "target claude.exe PID")
-	reset := fs.Int64("reset", 0, "rate-limit reset time (unix seconds)")
+	pid := fs.Uint("pid", 0, "target claude.exe PID (0 = auto-detect the blocked claude)")
+	reset := fs.Int64("reset", 0, "reset time as unix seconds (the status line uses this)")
 	delay := fs.Duration("delay", 3*time.Minute, "delay after reset before checking")
-	stateDir := fs.String("state", "", "state directory (for lock cleanup and log)")
+	stateDir := fs.String("state", "", "state directory for the log (default ~/.continue-claude)")
 	timeout := fs.Duration("timeout", 10*time.Minute, "give up if no actionable state appears")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *pid == 0 || *reset == 0 {
-		return fmt.Errorf("missing -pid or -reset")
+
+	now := time.Now()
+
+	// Reset time: a positional HH:MM argument (ad-hoc use) takes precedence,
+	// then -reset unix seconds (status line), else now (check immediately).
+	var resetAt time.Time
+	switch {
+	case fs.NArg() >= 1:
+		t, err := parseClockTime(fs.Arg(0), now)
+		if err != nil {
+			return err
+		}
+		resetAt = t
+	case *reset > 0:
+		resetAt = time.Unix(*reset, 0)
+	default:
+		resetAt = now
 	}
 
+	// Target PID: explicit -pid, else auto-detect the blocked claude.
+	target := uint32(*pid)
+	if target == 0 {
+		detected, err := coninject.FindBlockedClaude()
+		if err != nil {
+			return err
+		}
+		target = detected
+	}
+
+	// statusLineMode means the status line spawned us and owns armed.lock; only
+	// then do we clear it on exit. Ad-hoc runs never touch the lock.
+	statusLineMode := *reset > 0 && *stateDir != ""
+
+	dir := *stateDir
+	if dir == "" {
+		dir, _ = defaultStateDir()
+	}
 	logPath := ""
-	if *stateDir != "" {
-		logPath = filepath.Join(*stateDir, "watch.log")
+	if dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+		logPath = filepath.Join(dir, "watch.log")
 	}
 	logf := func(format string, a ...any) {
+		line := fmt.Sprintf(format, a...)
+		// Best-effort terminal feedback (lost once we FreeConsole to attach).
+		fmt.Fprintln(os.Stderr, "continue-claude watch:", line)
 		if logPath == "" {
 			return
 		}
@@ -44,20 +83,22 @@ func runWatch(args []string) error {
 			return
 		}
 		defer f.Close()
-		fmt.Fprintf(f, "%s\t%s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, a...))
+		fmt.Fprintf(f, "%s\t%s\n", time.Now().Format("2006-01-02 15:04:05"), line)
 	}
 
-	fireAt := time.Unix(*reset, 0).Add(*delay)
-	logf("watch armed pid=%d reset=%s fireAt=%s", *pid, time.Unix(*reset, 0).Format("15:04:05"), fireAt.Format("15:04:05"))
+	fireAt := resetAt.Add(*delay)
+	logf("armed pid=%d reset=%s fireAt=%s", target, resetAt.Format("15:04"), fireAt.Format("15:04:05"))
 	if d := time.Until(fireAt); d > 0 {
 		time.Sleep(d)
 	}
 
-	defer clearLock(*stateDir)
+	if statusLineMode {
+		defer clearLock(*stateDir)
+	}
 
 	deadline := fireAt.Add(*timeout)
 	for {
-		screen, err := coninject.ReadScreen(uint32(*pid))
+		screen, err := coninject.ReadScreen(target)
 		state := coninject.StateUnknown
 		if err == nil {
 			state = coninject.Classify(screen)
@@ -65,11 +106,11 @@ func runWatch(args []string) error {
 
 		switch state {
 		case coninject.StateModal:
-			err := coninject.Inject(uint32(*pid), unlockSteps())
+			err := coninject.Inject(target, unlockSteps())
 			logf("modal -> inject 1+continue (err=%v)", err)
 			return err
 		case coninject.StateIdle:
-			err := coninject.Inject(uint32(*pid), idleSteps())
+			err := coninject.Inject(target, idleSteps())
 			logf("idle -> inject continue-prompt (err=%v)", err)
 			return err
 		case coninject.StateBusy:
@@ -83,6 +124,32 @@ func runWatch(args []string) error {
 			time.Sleep(15 * time.Second)
 		}
 	}
+}
+
+// parseClockTime turns an "HH:MM" (or "HH:MM:SS"), 24-hour local clock string
+// into the next time that clock reads — today if still ahead, otherwise
+// tomorrow. Rate-limit resets are always within a few hours, so "next
+// occurrence" is unambiguous in practice.
+func parseClockTime(s string, now time.Time) (time.Time, error) {
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return time.Time{}, fmt.Errorf("cannot parse time %q (want HH:MM, 24-hour)", s)
+	}
+	h, err1 := strconv.Atoi(parts[0])
+	m, err2 := strconv.Atoi(parts[1])
+	sec, err3 := 0, error(nil)
+	if len(parts) == 3 {
+		sec, err3 = strconv.Atoi(parts[2])
+	}
+	if err1 != nil || err2 != nil || err3 != nil ||
+		h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59 {
+		return time.Time{}, fmt.Errorf("invalid time %q (want HH:MM, 24-hour)", s)
+	}
+	res := time.Date(now.Year(), now.Month(), now.Day(), h, m, sec, 0, now.Location())
+	if res.Before(now) {
+		res = res.Add(24 * time.Hour)
+	}
+	return res, nil
 }
 
 func unlockSteps() []coninject.Step {
