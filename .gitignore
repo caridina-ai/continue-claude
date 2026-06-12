@@ -1,0 +1,13 @@
+# Compiled binary (install via `go install`)
+/continue-claude.exe
+*.exe
+
+# Runtime state / logs
+/test-state/
+*.log
+
+# Test/debug snapshots
+snap-*.txt
+
+# Claude Code working directory (tool-local, not part of the project)
+.claude/
