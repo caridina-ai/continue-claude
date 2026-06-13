@@ -2,38 +2,34 @@ package coninject
 
 import "strings"
 
-// State is the classification of Claude Code's current on-screen state, derived
-// from the bottom region of its console (the live UI, not the scrollback).
+// State is what the watcher can reliably tell from the bottom of Claude Code's
+// console in a single frame. Only the rate-limit menu has a stable, unique
+// marker ("1. Stop and wait"); idle vs busy cannot be told from one frame (no
+// reliable static text — the spinner wording varies and the prompt hints come
+// and go), so the watcher distinguishes those by whether the screen is *moving*
+// between two reads, not via Classify.
 type State int
 
 const (
-	// StateUnknown means the screen could not be classified — stand down.
+	// StateUnknown: not the rate-limit menu — could be idle, busy, or anything.
 	StateUnknown State = iota
-	// StateModal means the rate-limit options menu is showing.
+	// StateModal: the rate-limit menu is showing (its "1. Stop and wait" option).
 	StateModal
-	// StateBusy means Claude Code is actively working (interruptible).
-	StateBusy
-	// StateIdle means an empty prompt is waiting for input.
-	StateIdle
 )
 
 func (s State) String() string {
-	switch s {
-	case StateModal:
+	if s == StateModal {
 		return "modal"
-	case StateBusy:
-		return "busy"
-	case StateIdle:
-		return "idle"
-	default:
-		return "unknown"
 	}
+	return "unknown"
 }
 
-// Classify inspects the bottom region of a console snapshot and decides the
-// state. It deliberately matches only the last few live lines, because the
-// scrollback transcript can quote phrases like "esc to interrupt" that would
-// otherwise cause false positives.
+// Classify reports whether the bottom of the console is the rate-limit menu. It
+// matches only the actual "1. Stop and wait" option text — what pressing 1
+// selects, and unique to that menu — within the bottom few rows, never the
+// scrollback, so a transcript that merely quotes the menu cannot trip a false
+// modal. Everything else is StateUnknown; the watcher tells idle from busy by
+// whether the screen moves between two reads.
 func Classify(screen string) State {
 	lines := make([]string, 0, 64)
 	for _, l := range strings.Split(screen, "\n") {
@@ -44,20 +40,10 @@ func Classify(screen string) State {
 	if len(lines) == 0 {
 		return StateUnknown
 	}
-
 	n := len(lines)
-	tail := strings.Join(lines[max(0, n-14):], "\n")
-	last := strings.Join(lines[max(0, n-3):], "\n")
-
-	switch {
-	case strings.Contains(tail, "Stop and wait for limit to reset") &&
-		strings.Contains(tail, "Esc to cancel"):
+	tail := strings.Join(lines[max(0, n-6):], "\n")
+	if strings.Contains(tail, "1. Stop and wait") {
 		return StateModal
-	case strings.Contains(last, "esc to interrupt"):
-		return StateBusy
-	case strings.Contains(last, "shift+tab to cycle"):
-		return StateIdle
-	default:
-		return StateUnknown
 	}
+	return StateUnknown
 }

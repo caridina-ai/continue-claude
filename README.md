@@ -76,8 +76,11 @@ The status line accepts these flags (append them after `continue-claude` in the
 | `-week-threshold`    | `95`                 | 7-day usage % that arms a watcher             |
 | `-post-reset-delay`  | `3m`                 | wait after reset before the watcher checks    |
 | `-state`             | `~/.continue-claude` | directory for the watcher lock and `watch.log` |
+| `-debug`             | off                  | verbose logging (a switch, no value): every tick/poll/skip |
 
-The watcher logs every arm/action to `~/.continue-claude/watch.log`.
+By default the status line and its watchers log only actions — arming,
+injecting, stand-downs — to `~/.continue-claude/watch.log`. Add `-debug` (e.g.
+`"command": "continue-claude -debug"`) for the full per-tick/per-poll trace.
 
 Multiple Claude Code sessions are handled independently: each status line arms
 and tracks its own watcher with a per-instance lock (`armed-<pid>.lock`), so all
@@ -85,10 +88,19 @@ of them recover when a shared account-wide limit resets.
 
 ## Unblock a stuck session manually
 
-You don't have to wait for the status line to arm a watcher in advance — if a
-session is *already* frozen at the rate-limit modal, open another terminal and
-run `watch` ad-hoc. It auto-detects the blocked claude (no PID needed) and waits
-until the reset time you give it, so you don't have to sit there:
+You don't have to wait for the status line to arm a watcher in advance. If
+sessions are *already* frozen at the rate-limit modal, run `check` in another
+terminal: it scans every running Claude Code, reads each blocked one's reset
+time off its screen, and arms a watcher per session — no PID or time needed.
+
+```sh
+continue-claude check            # scan all sessions, arm a watcher per blocked one
+continue-claude check -dry-run   # show what it would arm, without spawning
+```
+
+To act on a single session with a reset time you already know, use `watch`. It
+auto-detects the blocked claude (no PID needed) and waits until the time you
+give it, so you don't have to sit there:
 
 ```sh
 continue-claude watch 19:30    # wait until 19:30, then press 1 + continue
@@ -119,15 +131,9 @@ directly (though `watch` doubles as the manual unblock command above):
 
 ```
 continue-claude watch    [-pid <PID>] [-reset <unix>] [-delay <dur>] [-state <dir>] [HH:MM]
-continue-claude inject   -pid <PID> [-delay <dur>] -mode <raw|unlock> [-text <s>] [-enter]
 continue-claude snapshot -pid <PID> [-delay <dur>] -out <file>
 ```
 
 ## Development
 
 Built and validated with **Claude Opus 4.8**.
-
-```sh
-go test ./...
-go build ./...
-```

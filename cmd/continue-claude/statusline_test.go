@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -31,10 +32,14 @@ func TestFormatStatusLineArmed(t *testing.T) {
 		UsedPercentage *float64 `json:"used_percentage"`
 	}{UsedPercentage: fp(11)}
 
-	// stateDir empty => ensureWatcher is a no-op, so no process is spawned.
+	// formatStatusLine is pure now: it computes the line and reports which limit
+	// armed, but spawns nothing (runStatusline arms after printing).
 	opts := statusOptions{usageThreshold: 90, weekThreshold: 95, postResetDelay: 3 * time.Minute}
 
-	got := formatStatusLine(input, current, opts, current)
+	got, armed := formatStatusLine(input, current, opts, current)
+	if armed == nil {
+		t.Fatal("expected the five-hour limit to arm")
+	}
 	want := "Fable 5 max thinking | context 11% | usage 96% reset 14:30 | week 10% reset 6/17 5:00 | check 14:33"
 	if got != want {
 		t.Fatalf("formatStatusLine =\n  %q\nwant\n  %q", got, want)
@@ -53,7 +58,10 @@ func TestFormatStatusLineNotArmed(t *testing.T) {
 	input.Model.DisplayName = "Fable 5"
 
 	opts := statusOptions{usageThreshold: 90, weekThreshold: 95, postResetDelay: 3 * time.Minute}
-	got := formatStatusLine(input, current, opts, current)
+	got, armed := formatStatusLine(input, current, opts, current)
+	if armed != nil {
+		t.Fatal("50% should not arm")
+	}
 	want := "Fable 5 -- | context --% | usage 50% reset 14:30"
 	if got != want {
 		t.Fatalf("formatStatusLine =\n  %q\nwant\n  %q", got, want)
@@ -61,23 +69,25 @@ func TestFormatStatusLineNotArmed(t *testing.T) {
 }
 
 func TestSelectArm(t *testing.T) {
-	earlier := int64(1000)
-	later := int64(2000)
+	now := time.Date(2026, 6, 13, 14, 0, 0, 0, time.UTC)
+	earlier := now.Add(1 * time.Hour).Unix() // future, sooner
+	later := now.Add(3 * time.Hour).Unix()   // future, later
+	past := now.Add(-2 * time.Hour).Unix()   // already elapsed
 
 	t.Run("nil", func(t *testing.T) {
-		if selectArm(nil, 90, 95) != nil {
+		if selectArm(nil, 90, 95, now) != nil {
 			t.Fatal("nil limits should not arm")
 		}
 	})
 	t.Run("below thresholds", func(t *testing.T) {
 		l := &rateLimits{FiveHour: &rateLimit{UsedPercentage: fp(89), ResetsAt: ip(earlier)}}
-		if selectArm(l, 90, 95) != nil {
+		if selectArm(l, 90, 95, now) != nil {
 			t.Fatal("89%% below 90 should not arm")
 		}
 	})
 	t.Run("five hour over (102%)", func(t *testing.T) {
 		l := &rateLimits{FiveHour: &rateLimit{UsedPercentage: fp(102), ResetsAt: ip(earlier)}}
-		got := selectArm(l, 90, 95)
+		got := selectArm(l, 90, 95, now)
 		if got == nil || *got.ResetsAt != earlier {
 			t.Fatalf("expected five-hour armed at %d, got %v", earlier, got)
 		}
@@ -87,9 +97,27 @@ func TestSelectArm(t *testing.T) {
 			FiveHour: &rateLimit{UsedPercentage: fp(96), ResetsAt: ip(earlier)},
 			SevenDay: &rateLimit{UsedPercentage: fp(99), ResetsAt: ip(later)},
 		}
-		got := selectArm(l, 90, 95)
+		got := selectArm(l, 90, 95, now)
 		if got == nil || *got.ResetsAt != later {
 			t.Fatalf("expected the later reset %d, got %v", later, got)
+		}
+	})
+	t.Run("over threshold but reset already elapsed -> not armed", func(t *testing.T) {
+		// The post-unblock stale-JSON case that caused the re-arm loop: usage still
+		// reads over the limit while its reset is already in the past.
+		l := &rateLimits{FiveHour: &rateLimit{UsedPercentage: fp(104), ResetsAt: ip(past)}}
+		if got := selectArm(l, 90, 95, now); got != nil {
+			t.Fatalf("a past reset must not arm, got %v", got)
+		}
+	})
+	t.Run("five-hour elapsed but week still ahead -> arm week", func(t *testing.T) {
+		l := &rateLimits{
+			FiveHour: &rateLimit{UsedPercentage: fp(104), ResetsAt: ip(past)},
+			SevenDay: &rateLimit{UsedPercentage: fp(99), ResetsAt: ip(later)},
+		}
+		got := selectArm(l, 90, 95, now)
+		if got == nil || *got.ResetsAt != later {
+			t.Fatalf("expected the still-future week reset %d, got %v", later, got)
 		}
 	})
 }
@@ -97,13 +125,13 @@ func TestSelectArm(t *testing.T) {
 func TestLockRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "armed.lock")
 
-	// Use the current process PID so the liveness check returns true.
-	writeLock(path, 1234567890, uint32(2))
-	if reset, alive := readLock(path); reset != 1234567890 || !alive {
-		// PID 2 may or may not be alive; just assert the reset parses.
-		if reset != 1234567890 {
-			t.Fatalf("readLock reset = %d, want 1234567890 (alive=%v)", reset, alive)
-		}
+	// Write a lock the way ensureWatcher does ("<reset> <watcher-pid>\n") and read
+	// it back. PID 2 may or may not be alive, so assert only that the reset parses.
+	if err := os.WriteFile(path, []byte("1234567890 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if reset, _ := readLock(path); reset != 1234567890 {
+		t.Fatalf("readLock reset = %d, want 1234567890", reset)
 	}
 
 	if reset, alive := readLock(filepath.Join(t.TempDir(), "missing.lock")); reset != 0 || alive {

@@ -14,6 +14,19 @@ const modalScreen = `●Some earlier assistant output that even mentions esc to 
 
    Enter to confirm · Esc to cancel`
 
+// blockedIdleScreen is the snap-5076 trap: the limit banner is on screen, but
+// there is no menu — just the idle prompt. Pressing 1 here would be wrong, so it
+// must classify as idle (nudge with the continue prompt), never modal.
+const blockedIdleScreen = `> hello
+You've hit your session limit · resets 3:30pm (Asia/Taipei)
+/upgrade to increase your usage limit.
+
+✻ Worked for 0s
+────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents`
+
 const busyScreen = `●Working on the thing...
 
   Running 1 shell command…
@@ -39,8 +52,9 @@ func TestClassify(t *testing.T) {
 		want   State
 	}{
 		{"modal", modalScreen, StateModal},
-		{"busy", busyScreen, StateBusy},
-		{"idle", idleScreen, StateIdle},
+		{"blocked but idle (no menu)", blockedIdleScreen, StateUnknown},
+		{"busy", busyScreen, StateUnknown},
+		{"idle", idleScreen, StateUnknown},
 		{"empty", "", StateUnknown},
 		{"garbage", "just some\nrandom lines\nwith no markers", StateUnknown},
 	}
@@ -53,13 +67,18 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// TestClassifyIgnoresScrollback guards the reason we only match the bottom
-// rows: the phrase "esc to interrupt" appearing up in the transcript must not
-// make an idle screen look busy.
+// TestClassifyIgnoresScrollback guards the reason we match only the bottom
+// rows: a session that *quotes* the menu — including the exact "1. Stop and
+// wait" option — up in the scrollback, but whose live region is an idle prompt,
+// must NOT look like a modal. (The snap-5076 trap.)
 func TestClassifyIgnoresScrollback(t *testing.T) {
-	screen := "I once typed esc to interrupt in a message.\n" +
-		"And also Stop and wait for limit to reset, just chatting.\n" + idleScreen
-	if got := Classify(screen); got != StateIdle {
-		t.Fatalf("Classify with scrollback noise = %v, want %v", got, StateIdle)
+	screen := "> show me the rate-limit menu\n" +
+		"It was:\n" +
+		"> 1. Stop and wait for limit to reset\n" +
+		"  2. Upgrade your plan\n" +
+		"  Enter to confirm · Esc to cancel\n" +
+		"\n" + idleScreen
+	if got := Classify(screen); got != StateUnknown {
+		t.Fatalf("Classify with menu text in scrollback = %v, want %v", got, StateUnknown)
 	}
 }

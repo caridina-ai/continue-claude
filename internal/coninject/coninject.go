@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	keyEvent  = 0x0001
-	vkReturn  = 0x0D
-	genericRW = 0x80000000 | 0x40000000
-	shareRW   = 0x00000001 | 0x00000002
+	keyEvent     = 0x0001
+	vkReturn     = 0x0D
+	genericRW    = 0x80000000 | 0x40000000
+	shareRW      = 0x00000001 | 0x00000002
 	openExisting = 3
 )
 
@@ -42,9 +42,9 @@ type inputRecord struct {
 }
 
 var (
-	kernel32             = windows.NewLazySystemDLL("kernel32.dll")
-	procFreeConsole      = kernel32.NewProc("FreeConsole")
-	procAttachConsole    = kernel32.NewProc("AttachConsole")
+	kernel32              = windows.NewLazySystemDLL("kernel32.dll")
+	procFreeConsole       = kernel32.NewProc("FreeConsole")
+	procAttachConsole     = kernel32.NewProc("AttachConsole")
 	procWriteConsoleInput = kernel32.NewProc("WriteConsoleInputW")
 )
 
