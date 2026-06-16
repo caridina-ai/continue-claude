@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -164,6 +165,49 @@ func TestLockPID(t *testing.T) {
 	// round-trip with lockName
 	if pid, ok := lockPID(lockName(99)); !ok || pid != 99 {
 		t.Fatalf("round-trip lockName(99) => (%d,%v)", pid, ok)
+	}
+}
+
+func TestWindowTag(t *testing.T) {
+	// The four cases captured live, each with its real status JSON shape.
+	tests := []struct {
+		name, jsonInput, want string
+	}{
+		{"(1) plain checkout on main", `{"workspace":{"project_dir":"D:\\projects\\continue-claude"}}`, "[continue-claude]"},
+		{"(2) on branch B, no worktree", `{"workspace":{"project_dir":"D:\\projects\\continue-claude"}}`, "[continue-claude]"},
+		{"(3) claude --worktree A", `{"workspace":{"project_dir":"D:\\projects\\continue-claude\\.claude\\worktrees\\A"},"worktree":{"name":"A","original_cwd":"D:\\projects\\continue-claude"}}`, "[continue-claude | A]"},
+		{"(4) manual git worktree add", `{"workspace":{"project_dir":"E:\\worktree-C"},"worktree":{}}`, "[worktree-C]"},
+		{"worktree name but no original_cwd -> project leaf", `{"workspace":{"project_dir":"D:\\p\\x"},"worktree":{"name":"A"}}`, "[x | A]"},
+		{"no project dir", `{}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var in statusInput
+			if err := json.Unmarshal([]byte(tt.jsonInput), &in); err != nil {
+				t.Fatal(err)
+			}
+			if got := windowTag(in); got != tt.want {
+				t.Fatalf("windowTag = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatStatusLinePrefixed(t *testing.T) {
+	current := time.Date(2026, 6, 12, 14, 0, 0, 0, time.UTC)
+	five := time.Date(2026, 6, 12, 14, 30, 0, 0, time.UTC).Unix()
+
+	in := statusInput{RateLimits: &rateLimits{FiveHour: &rateLimit{UsedPercentage: fp(6), ResetsAt: ip(five)}}}
+	in.Model.DisplayName = "Opus 4.8"
+	if err := json.Unmarshal([]byte(`{"workspace":{"project_dir":"D:/projects/continue-claude/.claude/worktrees/A"},"worktree":{"name":"A","original_cwd":"D:/projects/continue-claude"}}`), &in); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := statusOptions{usageThreshold: 90, weekThreshold: 95, postResetDelay: 3 * time.Minute}
+	got, _ := formatStatusLine(in, current, opts, current)
+	want := "[continue-claude | A] Opus 4.8 -- | context --% | usage 6% reset 14:30"
+	if got != want {
+		t.Fatalf("formatStatusLine =\n  %q\nwant\n  %q", got, want)
 	}
 }
 

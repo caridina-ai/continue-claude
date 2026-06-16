@@ -22,7 +22,10 @@ resets it reaches back into Claude Code's own console and presses `1`
 
 The status line is invoked by Claude Code roughly once a minute. Each call:
 
-1. Prints the usual status line (model, context, usage, week).
+1. Prints the usual status line, led by a `[…]` tag identifying the window
+   (model, context, usage, week follow). The tag is the project directory's leaf
+   — `[continue-claude]` — or, in a `claude --worktree` session, the original
+   project's leaf plus the worktree name — `[continue-claude | A]`.
 2. If usage is in the danger zone (≥ 90% by default), it spawns a detached
    **watcher** and appends a `check HH:MM` marker to the status line.
 

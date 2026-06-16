@@ -32,6 +32,16 @@ type statusInput struct {
 	Model struct {
 		DisplayName string `json:"display_name"`
 	} `json:"model"`
+	Workspace *struct {
+		ProjectDir string `json:"project_dir"`
+	} `json:"workspace"`
+	// Worktree is populated only in `claude --worktree` sessions (not plain
+	// `git worktree add`, where these stay empty and project_dir is the worktree
+	// itself). Name presence is what marks a --worktree session.
+	Worktree *struct {
+		Name        string `json:"name"`
+		OriginalCwd string `json:"original_cwd"`
+	} `json:"worktree"`
 	Effort *struct {
 		Level string `json:"level"`
 	} `json:"effort"`
@@ -165,7 +175,49 @@ func formatStatusLine(input statusInput, current time.Time, opts statusOptions, 
 		parts = append(parts, armWord+" "+formatLocalMinute(fireAt, current))
 	}
 
-	return strings.Join(parts, " | "), armed
+	line := strings.Join(parts, " | ")
+
+	// Identify which window this is, ahead of the model.
+	if tag := windowTag(input); tag != "" {
+		line = tag + " " + line
+	}
+
+	return line, armed
+}
+
+// windowTag is the leading "[…]" marker identifying which window this is.
+//
+//   - Normally it is the project directory's leaf, e.g. "[continue-claude]". This
+//     covers a plain checkout, a non-worktree branch (a bare branch carries no
+//     signal in the status JSON), and a manual `git worktree add` (project_dir is
+//     then the worktree itself, so its leaf is shown).
+//   - In a `claude --worktree` session it is the original project's leaf and the
+//     worktree name, "[continue-claude | A]" — because there project_dir is the
+//     worktree path, so the original is recovered from worktree.original_cwd.
+//
+// cwd is deliberately not shown: /cd can relocate the session wholesale, and
+// project_dir == cwd in every observed case anyway. Empty when no project_dir.
+func windowTag(input statusInput) string {
+	projectDir := ""
+	if input.Workspace != nil {
+		projectDir = input.Workspace.ProjectDir
+	}
+	// A --worktree session is marked by worktree.name. project_dir there is the
+	// worktree path, so show the original project's leaf instead, plus the name.
+	if input.Worktree != nil && input.Worktree.Name != "" {
+		origin := lastSegment(input.Worktree.OriginalCwd)
+		if origin == "" {
+			origin = lastSegment(projectDir)
+		}
+		if origin == "" {
+			return "[" + input.Worktree.Name + "]"
+		}
+		return "[" + origin + " | " + input.Worktree.Name + "]"
+	}
+	if leaf := lastSegment(projectDir); leaf != "" {
+		return "[" + leaf + "]"
+	}
+	return ""
 }
 
 // hasReset reports whether the JSON carried a 5-hour reset time. Without it the
@@ -471,4 +523,23 @@ func sameLocalDate(a, b time.Time) bool {
 	ay, am, ad := a.Date()
 	by, bm, bd := b.Date()
 	return ay == by && am == bm && ad == bd
+}
+
+// pathSegments splits a path into its components, treating "\" and "/" alike and
+// keeping the drive (e.g. "D:") as the first segment. Trailing separators are
+// ignored, so "D:\projects\" and "D:\projects" segment identically.
+func pathSegments(p string) []string {
+	p = strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(p), "\\", "/"), "/")
+	if p == "" {
+		return nil
+	}
+	return strings.Split(p, "/")
+}
+
+func lastSegment(p string) string {
+	segs := pathSegments(p)
+	if len(segs) == 0 {
+		return ""
+	}
+	return segs[len(segs)-1]
 }
