@@ -47,3 +47,24 @@ func Classify(screen string) State {
 	}
 	return StateUnknown
 }
+
+// IsRateLimited reports whether the screen shows Claude Code's inline rate-limit
+// rejection — the "You've hit your … limit · resets …" line printed under a
+// prompt that was refused because the window is exhausted. This is the
+// idle-prompt form of a block (the session sits at the prompt, no menu), and is
+// distinct from the /rate-limit-options menu that Classify detects.
+//
+// It exists because a freshly-started session whose very first call is blocked
+// may never carry structured rate-limit data in its status JSON — so the only
+// on-screen evidence of the block is this line, not the menu. Callers pair it
+// with a future-reset check (parseScreenReset) to avoid acting on a stale
+// rejection still sitting in the scrollback of a session that has recovered.
+func IsRateLimited(screen string) bool {
+	for _, l := range strings.Split(screen, "\n") {
+		low := strings.ToLower(l)
+		if strings.Contains(low, "hit your") && strings.Contains(low, "limit") {
+			return true
+		}
+	}
+	return false
+}

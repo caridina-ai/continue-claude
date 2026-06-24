@@ -368,8 +368,67 @@ func armFromOwnScreen(opts statusOptions) {
 	case outcomeUnparseable:
 		logEvent(opts.stateDir, "fallback pid=%d blocked but reset unparseable (raw=%q)", pid, raw)
 	case outcomeSkipNotModal:
-		// not blocked — the JSON just lacked a reset this tick; nothing to do
+		// No block on screen yet, and the JSON carried no rate-limit data either,
+		// so this may be a session that just submitted a prompt while over the
+		// limit with the rejection still rendering — and Claude Code may not invoke
+		// the status line again once it settles at the block. This one call has to
+		// set things in motion: spawn a detached poller that waits for the block to
+		// appear and then arms itself. The poller decides whether a turn is really
+		// in flight by screen movement and stands down within a couple of seconds
+		// if the screen is just idle, so spawning on any no-reset tick is cheap;
+		// the per-pid lock keeps it to one at a time.
+		spawnAwaitBlockWatcher(opts, pid)
 	}
+}
+
+// spawnAwaitBlockWatcher launches a detached `watch -await-block` for a session
+// that looks mid-submission but whose status JSON carries no reset yet. It
+// mirrors ensureWatcher's atomic lock claim — the poller owns armed-<pid>.lock
+// while it waits, so repeated no-reset ticks don't pile up duplicates — but hands
+// over no reset: the watcher discovers it by polling the screen. The lock holds a
+// reset=0 sentinel, which (being non-empty) also blocks a concurrent JSON-path
+// arm from double-spawning until the poller resolves or exits.
+func spawnAwaitBlockWatcher(opts statusOptions, claudePID uint32) {
+	if opts.stateDir == "" {
+		return
+	}
+	_ = os.MkdirAll(opts.stateDir, 0o755)
+	lockPath := filepath.Join(opts.stateDir, lockName(claudePID))
+
+	if existing, alive := readLock(lockPath); alive {
+		return // already armed or polling
+	} else if existing != 0 {
+		_ = os.Remove(lockPath) // dead watcher's lock — clear it so the claim can win
+	}
+	claim, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		logDebug(opts.stateDir, "fallback pid=%d await-block: lost claim to concurrent invocation -> skip", claudePID)
+		return
+	}
+	defer claim.Close()
+
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(exe, watchArgs(
+		"-pid", strconv.FormatUint(uint64(claudePID), 10),
+		"-await-block",
+		"-delay", opts.postResetDelay.String(),
+		"-state", opts.stateDir,
+	)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: detachedProcess | createNoWindow}
+	if err := cmd.Start(); err != nil {
+		logEvent(opts.stateDir, "fallback pid=%d await-block spawn failed: %v", claudePID, err)
+		_ = os.Remove(lockPath)
+		return
+	}
+	fmt.Fprintf(claim, "0 %d\n", cmd.Process.Pid) // reset=0: poller pending, reset not yet known
+	// Debug-level: a poller spawns on every no-reset tick and usually finds
+	// nothing; only the ones that actually detect a block (logged by the watcher
+	// itself) are worth the normal log.
+	logDebug(opts.stateDir, "fallback pid=%d await-block: spawned poller wpid=%d", claudePID, cmd.Process.Pid)
+	_ = cmd.Process.Release()
 }
 
 // debugLog gates verbose, high-frequency logging (every status tick, every

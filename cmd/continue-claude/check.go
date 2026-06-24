@@ -30,15 +30,36 @@ const (
 // classifyForCheck decides what `check` should do with a single screen: arm a
 // watcher (returning the reset), skip it (not blocked), or flag it as blocked
 // with an unparseable reset (returning the raw text for diagnosis).
+//
+// Two on-screen forms count as blocked:
+//   - the /rate-limit-options menu (Classify -> StateModal): arm on whatever
+//     reset it shows, ahead or already passed — a session can sit frozen at the
+//     menu for hours, so a past reset still means "act now".
+//   - the inline "You've hit your … limit · resets …" rejection at an idle prompt
+//     (IsRateLimited): the form a freshly-blocked session shows when its status
+//     JSON carries no rate-limit data yet. Here a *past* reset is almost always
+//     stale scrollback from a session that has already recovered, so arm only
+//     when the reset is still ahead.
 func classifyForCheck(screen string, now time.Time) (resetAt time.Time, raw string, outcome checkOutcome) {
-	if coninject.Classify(screen) != coninject.StateModal {
+	switch {
+	case coninject.Classify(screen) == coninject.StateModal:
+		resetAt, raw, ok := parseScreenReset(screen, now)
+		if !ok {
+			return time.Time{}, raw, outcomeUnparseable
+		}
+		return resetAt, raw, outcomeArm
+	case coninject.IsRateLimited(screen):
+		resetAt, raw, ok := parseScreenReset(screen, now)
+		if !ok {
+			return time.Time{}, raw, outcomeUnparseable
+		}
+		if !resetAt.After(now) {
+			return time.Time{}, raw, outcomeSkipNotModal // stale rejection, not a live block
+		}
+		return resetAt, raw, outcomeArm
+	default:
 		return time.Time{}, "", outcomeSkipNotModal
 	}
-	resetAt, raw, ok := parseScreenReset(screen, now)
-	if !ok {
-		return time.Time{}, raw, outcomeUnparseable
-	}
-	return resetAt, raw, outcomeArm
 }
 
 // runCheck is the general external entry point: scan every running claude.exe,

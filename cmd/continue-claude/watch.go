@@ -18,9 +18,31 @@ import (
 const maxResetAhead = 5 * time.Hour
 
 // settleDelay is how long the watcher waits between its two screen reads when
-// telling idle from busy: long enough for a running spinner's per-second counter
-// to tick, so a working session reads as "moving" and an idle one as "still".
-const settleDelay = 2 * time.Second
+// telling idle from busy. It must comfortably exceed the spinner's per-second
+// tick so a working session always reads as "moving": at 2s two reads can still
+// straddle a single counter value (no visible change), so we use 3s to guarantee
+// the counter has advanced. A genuinely idle screen stays "still" regardless.
+const settleDelay = 3 * time.Second
+
+// awaitBlockTimeout bounds how long an -await-block watcher waits for the block
+// to render before giving up. A genuine rejection appears within seconds of the
+// submission that spawned us, so a longer silence means the call was not actually
+// blocked (it succeeded, or is a normal long-running turn) and there is nothing
+// to arm. awaitBlockPoll is the gap between screen reads while waiting.
+const (
+	awaitBlockTimeout = 90 * time.Second
+	awaitBlockPoll    = 3 * time.Second
+)
+
+// maxIdleAttempts caps how many times the idle path re-injects the recovery
+// prompt while waiting for it to take. This is only a backstop for keystrokes
+// that never reach the console (the inject is a complete no-op, leaving the
+// screen unchanged): the moment an inject *does* land — the prompt submits, then
+// processes, finishes, errors, or bounces — the watcher stands down rather than
+// re-injecting, so a session that simply can't proceed (e.g. a 509 outage) is
+// never flooded. So a small cap is enough; we are not waiting out a slow reset
+// here (fireAt is already minutes past it).
+const maxIdleAttempts = 3
 
 // idlePrompt is injected when the session is idle at check time. It states the
 // rate-limit recovery as a fact (rather than asking whether it happened, since
@@ -36,6 +58,7 @@ func runWatch(args []string) error {
 	delay := fs.Duration("delay", 3*time.Minute, "delay after reset before checking")
 	stateDir := fs.String("state", "", "state directory for the log (default ~/.continue-claude)")
 	timeout := fs.Duration("timeout", 10*time.Minute, "give up if no actionable state appears")
+	awaitBlock := fs.Bool("await-block", false, "poll the screen for the block to appear and read the reset off it before arming (no -reset needed)")
 	debug := fs.Bool("debug", false, "verbose logging: every poll and unknown-screen dump, not just actions")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -71,8 +94,10 @@ func runWatch(args []string) error {
 	}
 
 	// statusLineMode means the status line spawned us and owns armed-<pid>.lock;
-	// only then do we clear it on exit. Ad-hoc runs never touch the lock.
-	statusLineMode := *reset > 0 && *stateDir != ""
+	// only then do we clear it on exit. Ad-hoc runs never touch the lock. An
+	// await-block watcher is spawned the same way (it just discovers its reset by
+	// polling rather than being handed one), so it owns the lock too.
+	statusLineMode := (*reset > 0 || *awaitBlock) && *stateDir != ""
 
 	dir := *stateDir
 	if dir == "" {
@@ -109,6 +134,19 @@ func runWatch(args []string) error {
 		defer clearLock(*stateDir, target)
 	}
 
+	// await-block: we were spawned at the instant a session submitted a prompt
+	// while over the limit, before Claude Code rendered the rejection (or any
+	// reset into its status JSON) — so there is no reset to wait on yet. Poll the
+	// screen until the block appears and its reset can be read off it, then fall
+	// through into the normal wait-until-reset flow with that reset.
+	if *awaitBlock {
+		discovered, ok := awaitBlockReset(target, logf, logfDebug)
+		if !ok {
+			return nil // target gone or no block appeared; lock cleared by defer
+		}
+		resetAt = discovered
+	}
+
 	fireAt := resetAt.Add(*delay)
 	logf("armed pid=%d reset=%s fireAt=%s", target, resetAt.Format("15:04"), fireAt.Format("15:04:05"))
 
@@ -127,6 +165,8 @@ func runWatch(args []string) error {
 	}
 
 	deadline := fireAt.Add(*timeout)
+	idleAttempts := 0
+	injectedBaseline := "" // screen as it was at our last idle inject ("" = none yet)
 	for {
 		if !coninject.IsAlive(target) {
 			logf("pid=%d target exited -> stand down", target)
@@ -163,9 +203,35 @@ func runWatch(args []string) error {
 				logf("pid=%d busy (screen still moving) -> stand down", target)
 				return nil
 			}
-			err := coninject.Inject(target, idleSteps())
-			logf("pid=%d idle (screen settled) -> inject continue-prompt (err=%v)", target, err)
-			return err
+			// Idle and settled. If we already injected the recovery prompt and the
+			// screen has since changed, the prompt landed and the session settled
+			// into a new state — finished, errored, or bounced. Re-injecting would
+			// only pile more prompts onto a session that can't currently proceed
+			// (e.g. a 509 outage, where every submission just errors), so stand
+			// down: the job (resubmit once) is done, and spamming helps no one.
+			if injectedBaseline != "" && movedBetween(injectedBaseline, screen2) {
+				logf("pid=%d idle: recovery prompt landed (screen changed since inject) -> stand down", target)
+				return nil
+			}
+			// First time, or the screen is byte-for-byte what it was when we last
+			// injected (our own status line aside) — i.e. the keystrokes never
+			// reached the console. (Re-)inject; an inject that does take is caught
+			// by the branch above (or by "busy" once it starts processing).
+			idleAttempts++
+			if err := coninject.Inject(target, idleSteps()); err != nil {
+				logf("pid=%d idle -> inject continue-prompt failed (attempt %d, err=%v)", target, idleAttempts, err)
+				return err
+			}
+			logf("pid=%d idle (screen settled) -> inject continue-prompt (attempt %d)", target, idleAttempts)
+			injectedBaseline = screen2
+			if idleAttempts >= maxIdleAttempts || time.Now().After(deadline) {
+				logf("pid=%d idle inject did not land after %d attempt(s) -> stand down", target, idleAttempts)
+				return nil
+			}
+			// Let the inject reach its resting state before re-reading, so the next
+			// pass compares against a settled screen rather than a transient frame.
+			time.Sleep(settleDelay)
+			continue
 		}
 
 		// At least one read errored. If the target is gone, stand down now;
@@ -181,6 +247,76 @@ func runWatch(args []string) error {
 		}
 		// settleDelay already slept above; loop and try again.
 	}
+}
+
+// awaitBlockReset polls the target's screen until a rate-limit block appears and
+// its reset can be read off it, returning that reset. It is the leading phase of
+// a watcher spawned with -await-block, used when the status line caught a session
+// mid-submission while over the limit (no reset in the JSON, rejection not yet on
+// screen). The same classification `check` uses decides when a block is present;
+// once found we hand the reset back to the normal wait-until-reset flow.
+//
+// Whether to keep waiting is decided the same way the watcher tells busy from
+// idle — by movement between two reads, never by any single-frame "is it
+// running" marker (Claude Code has none reliable). A moving screen means a turn
+// is in flight and a block may still render, so we wait; a screen that settles
+// with no block means nothing is on its way and we stand down. Returns ok=false
+// if the target exits, the screen settles unblocked, or awaitBlockTimeout passes.
+func awaitBlockReset(target uint32, logf, logfDebug func(string, ...any)) (time.Time, bool) {
+	deadline := time.Now().Add(awaitBlockTimeout)
+	logfDebug("pid=%d await-block: waiting for the rate-limit screen to render", target)
+	for {
+		if !coninject.IsAlive(target) {
+			logfDebug("pid=%d await-block: target exited -> stand down", target)
+			return time.Time{}, false
+		}
+		screen1, err1 := coninject.ReadScreen(target)
+		if r, ok := blockReset(screen1, err1, target, logfDebug); ok {
+			logf("pid=%d await-block: block detected, reset=%s", target, r.Format("15:04"))
+			return r, true
+		}
+
+		time.Sleep(awaitBlockPoll)
+		if !coninject.IsAlive(target) {
+			logfDebug("pid=%d await-block: target exited -> stand down", target)
+			return time.Time{}, false
+		}
+		screen2, err2 := coninject.ReadScreen(target)
+		if r, ok := blockReset(screen2, err2, target, logfDebug); ok {
+			logf("pid=%d await-block: block detected, reset=%s", target, r.Format("15:04"))
+			return r, true
+		}
+
+		// No block on either read. A still screen means no turn is in flight and
+		// nothing is coming — stand down. A moving one means a turn is running, so
+		// keep waiting (a block may yet render) until the deadline.
+		if err1 == nil && err2 == nil && !movedBetween(screen1, screen2) {
+			logfDebug("pid=%d await-block: screen settled with no block -> stand down", target)
+			return time.Time{}, false
+		}
+		if time.Now().After(deadline) {
+			logfDebug("pid=%d await-block: no block within %s -> stand down", target, awaitBlockTimeout)
+			return time.Time{}, false
+		}
+	}
+}
+
+// blockReset reports the reset time if the given screen read shows a rate-limit
+// block (menu or inline rejection) with a parseable reset, using the same
+// classification as `check`. An unparseable block is logged and treated as
+// "not yet" so the caller keeps polling.
+func blockReset(screen string, readErr error, target uint32, logfDebug func(string, ...any)) (time.Time, bool) {
+	if readErr != nil {
+		return time.Time{}, false
+	}
+	resetAt, raw, outcome := classifyForCheck(screen, time.Now())
+	switch outcome {
+	case outcomeArm:
+		return resetAt, true
+	case outcomeUnparseable:
+		logfDebug("pid=%d await-block: blocked but reset unparseable (raw=%q)", target, raw)
+	}
+	return time.Time{}, false
 }
 
 // parseScreenReset extracts the reset time from a blocked screen's
@@ -203,7 +339,14 @@ func parseScreenReset(screen string, now time.Time) (resetAt time.Time, raw stri
 	}
 	raw = strings.TrimSpace(rest)
 
-	t, err := time.ParseInLocation("3:04pm", strings.ToLower(strings.ReplaceAll(raw, " ", "")), now.Location())
+	compact := strings.ToLower(strings.ReplaceAll(raw, " ", ""))
+	t, err := time.ParseInLocation("3:04pm", compact, now.Location())
+	if err != nil {
+		// Claude Code drops the ":00" for an on-the-hour reset ("1am", "3pm"),
+		// which the minute-bearing layout rejects; accept that form too. Getting
+		// this wrong leaves a real block unparseable and unarmed.
+		t, err = time.ParseInLocation("3pm", compact, now.Location())
+	}
 	if err != nil {
 		return time.Time{}, raw, false
 	}

@@ -2,7 +2,7 @@ package coninject
 
 import "testing"
 
-const modalScreen = `●Some earlier assistant output that even mentions esc to interrupt in passing.
+const modalScreen = `●Some earlier assistant output sitting up in the scrollback.
 
 ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
    What do you want to do?
@@ -35,7 +35,7 @@ const busyScreen = `●Working on the thing...
 ────────────────────────────────────────────────────────────────
 >
 ────────────────────────────────────────────────────────────────
-  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt`
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`
 
 const idleScreen = `●All done.
 
@@ -62,6 +62,28 @@ func TestClassify(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := Classify(c.screen); got != c.want {
 				t.Fatalf("Classify(%s) = %v, want %v", c.name, got, c.want)
+			}
+		})
+	}
+}
+
+func TestIsRateLimited(t *testing.T) {
+	cases := []struct {
+		name   string
+		screen string
+		want   bool
+	}{
+		{"inline rejection at idle prompt", blockedIdleScreen, true},
+		{"weekly limit wording", "> hi\nYou've hit your weekly limit · resets 6/20 3pm\n>\n", true},
+		{"menu only (no inline line)", modalScreen, false},
+		{"busy", busyScreen, false},
+		{"idle and unblocked", idleScreen, false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsRateLimited(c.screen); got != c.want {
+				t.Fatalf("IsRateLimited(%s) = %v, want %v", c.name, got, c.want)
 			}
 		})
 	}

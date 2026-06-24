@@ -35,8 +35,16 @@ target console's screen and classifies the live state:
 | Screen shows                          | State | Action                                   |
 | ------------------------------------- | ----- | ---------------------------------------- |
 | `Stop and wait for limit to reset`    | modal | inject `1`, then `continue` + Enter      |
-| `esc to interrupt`                    | busy  | stand down (it got past on its own)      |
-| an empty prompt                       | idle  | inject a self-correcting recovery prompt |
+| moving between two reads (spinner)    | busy  | stand down (it got past on its own)      |
+| still between two reads (idle prompt) | idle  | inject a self-correcting recovery prompt |
+
+For the idle case the watcher injects the recovery prompt and then watches what
+happens. As soon as the screen changes — the prompt submits and the session
+starts processing, finishes, errors, or bounces — it stands down: the prompt was
+delivered, so it never piles on a second one. It re-injects only if the screen is
+unchanged afterwards (the keystrokes never reached the console), and even then
+just a couple of times. So a session that genuinely can't proceed — say a 509
+outage you can only wait out — gets the prompt at most once, not a screenful.
 
 ### The injection trick
 
@@ -89,12 +97,42 @@ Multiple Claude Code sessions are handled independently: each status line arms
 and tracks its own watcher with a per-instance lock (`armed-<pid>.lock`), so all
 of them recover when a shared account-wide limit resets.
 
+## Resuming a freshly-started session
+
+You don't only get recovery on a session that was *already running* when it hit
+the limit. You can start Claude Code fresh while you're rate-limited, give it a
+single prompt for it to pick up once the window resets, and walk away — at reset
+the watcher injects the recovery prompt and the new session runs.
+
+To arm a watcher the status line needs to know you're blocked. It learns that
+three ways:
+
+- from the rate-limit fields in Claude Code's status JSON;
+- by reading the on-screen `You've hit your … limit · resets …` line, for a
+  freshly-blocked session whose JSON carries **no** rate-limit data yet; or
+- when even that isn't on screen yet — the status line caught the session at the
+  very instant it submitted a prompt over the limit, before the rejection had
+  rendered — by spawning a short-lived **poller** that waits (up to ~90s) for the
+  block to appear and then arms.
+
+That third path matters because Claude Code may invoke the status line only
+**once** for such a session — right as the prompt goes in — and not again once it
+settles at the block. That single invocation kicks off the poller, so the session
+still gets armed with no second keypress or command from you. (The
+`/rate-limit-options` menu does *not* block the status line; it runs fine while
+that menu is up.)
+
+If you ever do find a session stuck with no `armed-<pid>.lock` — say it was
+already blocked before the status line was installed — `continue-claude check`
+(below) arms every blocked session on demand.
+
 ## Unblock a stuck session manually
 
-You don't have to wait for the status line to arm a watcher in advance. If
-sessions are *already* frozen at the rate-limit modal, run `check` in another
-terminal: it scans every running Claude Code, reads each blocked one's reset
-time off its screen, and arms a watcher per session — no PID or time needed.
+You don't have to wait for the status line to arm a watcher in advance. Run
+`check` in another terminal: it scans every running Claude Code, reads each
+blocked one's reset time off its screen, and arms a watcher per session — no PID
+or time needed. "Blocked" covers both a session frozen at the `/rate-limit-options`
+menu and one sitting at an idle prompt under a `You've hit your … limit` line.
 
 ```sh
 continue-claude check            # scan all sessions, arm a watcher per blocked one
@@ -134,7 +172,15 @@ directly (though `watch` doubles as the manual unblock command above):
 
 ```
 continue-claude watch    [-pid <PID>] [-reset <unix>] [-delay <dur>] [-state <dir>] [HH:MM]
-continue-claude snapshot -pid <PID> [-delay <dur>] -out <file>
+continue-claude snapshot [-pid <PID>] [-delay <dur>] [-out <file>]
+```
+
+`snapshot` captures what a session currently shows on screen — handy when you
+want to see why the watcher classified a session the way it did. Run it **with no
+arguments** to dump *every* running Claude Code at once, one file per session:
+
+```sh
+continue-claude snapshot          # writes snap-<PID>.txt for every claude.exe
 ```
 
 ## Development

@@ -83,6 +83,12 @@ func TestParseScreenReset(t *testing.T) {
 		{"resets 12:05pm (Asia/Taipei)", 12, 5}, // just after noon
 		{"resets 11:59pm (Asia/Taipei)", 23, 59},
 		{"resets 1:00am (Asia/Taipei)", 1, 0},
+		// On-the-hour resets are printed minute-less ("1am", not "1:00am"); these
+		// must parse just the same, or a real block reads as unparseable.
+		{"resets 1am (Asia/Taipei)", 1, 0},
+		{"resets 3pm (Asia/Taipei)", 15, 0},
+		{"resets 12am (Asia/Taipei)", 0, 0},  // midnight
+		{"resets 12pm (Asia/Taipei)", 12, 0}, // noon
 	} {
 		t.Run(c.in, func(t *testing.T) {
 			got, _, ok := parseScreenReset(c.in, now)
